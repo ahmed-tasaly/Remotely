@@ -1,4 +1,5 @@
 ﻿using Remotely.Shared.Enums;
+using Remotely.Shared.Services;
 using Remotely.Shared.Utilities;
 using System;
 using System.Diagnostics;
@@ -11,9 +12,33 @@ using System.Threading.Tasks;
 
 namespace Remotely.Shared.Utilities
 {
+    [Obsolete("Please use ILogger<T> via dependency injection.")]
     public static class Logger
     {
-        private static string LogPath => Path.Combine(Path.GetTempPath(), "Remotely_Logs.log");
+        private static string _logDir;
+
+        private static string LogDir
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(_logDir))
+                {
+                    return _logDir;
+                }
+
+                if (OperatingSystem.IsWindows())
+                {
+                    _logDir = Directory.CreateDirectory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Remotely", "Logs")).FullName;
+                }
+                else
+                {
+                    _logDir = Directory.CreateDirectory("/var/log/remotely").FullName;
+                }
+                return _logDir;
+            }
+        }
+
+        private static string LogPath => Path.Combine(LogDir, $"LogFile_{DateTime.Now:yyyy-MM-dd}.log");
         private static SemaphoreSlim WriteLock { get; } = new(1, 1);
         public static void Debug(string message, [CallerMemberName] string callerName = "")
         {
@@ -130,7 +155,7 @@ namespace Remotely.Shared.Utilities
                 File.Create(LogPath).Close();
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
                 {
-                    Process.Start("sudo", $"chmod 777 {LogPath}").WaitForExit();
+                    Process.Start("sudo", $"chmod 775 {LogPath}").WaitForExit();
                 }
             }
             if (File.Exists(LogPath))

@@ -6,16 +6,19 @@ namespace Remotely.Agent.Installer.Win.Utilities
 {
     public class Logger
     {
-        private static string LogPath => Path.Combine(Path.GetTempPath(), "Remotely_Installer.log");
-        private static object WriteLock { get; } = new object();
+        public static string LogsDir { get; } = Directory.CreateDirectory(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Remotely", "Logs")).FullName;
+        public static string LogsPath { get; } = Path.Combine(LogsDir, "Installer.log");
+
+        private static readonly object _writeLock = new object();
+
         public static void Debug(string message)
         {
-            lock (WriteLock)
+            lock (_writeLock)
             {
 #if DEBUG
                 CheckLogFileExists();
 
-                File.AppendAllText(LogPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Debug]\t{message}{Environment.NewLine}");
+                File.AppendAllText(LogsPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Debug]\t{message}{Environment.NewLine}");
 
 #endif
                 System.Diagnostics.Debug.WriteLine(message);
@@ -27,10 +30,10 @@ namespace Remotely.Agent.Installer.Win.Utilities
         {
             try
             {
-                lock (WriteLock)
+                lock (_writeLock)
                 {
                     CheckLogFileExists();
-                    File.AppendAllText(LogPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Info]\t{message}{Environment.NewLine}");
+                    File.AppendAllText(LogsPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Info]\t{message}{Environment.NewLine}");
                     Console.WriteLine(message);
                 }
             }
@@ -39,7 +42,7 @@ namespace Remotely.Agent.Installer.Win.Utilities
 
         public static void Write(Exception ex)
         {
-            lock (WriteLock)
+            lock (_writeLock)
             {
                 try
                 {
@@ -49,7 +52,7 @@ namespace Remotely.Agent.Installer.Win.Utilities
 
                     while (exception != null)
                     {
-                        File.AppendAllText(LogPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Error]\t{exception?.Message}\t{exception?.StackTrace}\t{exception?.Source}{Environment.NewLine}");
+                        File.AppendAllText(LogsPath, $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff}\t[Error]\t{exception?.Message}\t{exception?.StackTrace}\t{exception?.Source}{Environment.NewLine}");
                         Console.WriteLine(exception.Message);
                         exception = exception.InnerException;
                     }
@@ -60,19 +63,19 @@ namespace Remotely.Agent.Installer.Win.Utilities
 
         private static void CheckLogFileExists()
         {
-            if (!File.Exists(LogPath))
+            if (!File.Exists(LogsPath))
             {
-                File.Create(LogPath).Close();
+                File.Create(LogsPath).Close();
             }
 
-            if (File.Exists(LogPath))
+            if (File.Exists(LogsPath))
             {
-                var fi = new FileInfo(LogPath);
+                var fi = new FileInfo(LogsPath);
                 while (fi.Length > 1000000)
                 {
-                    var content = File.ReadAllLines(LogPath);
-                    File.WriteAllLines(LogPath, content.Skip(10));
-                    fi = new FileInfo(LogPath);
+                    var content = File.ReadAllLines(LogsPath);
+                    File.WriteAllLines(LogsPath, content.Skip(10));
+                    fi = new FileInfo(LogsPath);
                 }
             }
         }

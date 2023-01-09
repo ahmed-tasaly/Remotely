@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Components;
+﻿using Immense.RemoteControl.Server.Abstractions;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.SignalR;
@@ -23,9 +24,10 @@ namespace Remotely.Server.Components.Devices
 {
     public partial class DeviceCard : AuthComponentBase, IDisposable
     {
+        private readonly ConcurrentDictionary<string, double> _fileUploadProgressLookup = new();
         private ElementReference _card;
-        private ConcurrentDictionary<string, double> _fileUploadProgressLookup = new();
         private Theme _theme;
+        private Version _currentVersion = new();
 
         [Parameter]
         public Device Device { get; set; }
@@ -33,8 +35,6 @@ namespace Remotely.Server.Components.Devices
         [CascadingParameter]
         public DevicesFrame ParentFrame { get; set; }
 
-        [Parameter]
-        public ConcurrentDictionary<string, RemoteControlTarget> RemoteControlTargetLookup { get; set; }
 
         [Inject]
         private IClientAppState AppState { get; set; }
@@ -43,13 +43,19 @@ namespace Remotely.Server.Components.Devices
         private ICircuitConnection CircuitConnection { get; set; }
 
         [Inject]
+        private IServiceHubSessionCache ServiceSessionCache { get; init; }
+
+        [Inject]
+        private IUpgradeService UpgradeService { get; init; }
+
+        [Inject]
         private IDataService DataService { get; set; }
 
         private bool IsExpanded => GetCardState() == DeviceCardState.Expanded;
 
         private bool IsOutdated =>
             Version.TryParse(Device.AgentVersion, out var result) &&
-            result < ParentFrame.HighestVersion;
+            result < _currentVersion;
 
         private bool IsSelected => AppState.DevicesFrameSelectedDevices.Contains(Device.ID);
 
@@ -72,6 +78,7 @@ namespace Remotely.Server.Components.Devices
         {
             await base.OnInitializedAsync();
             _theme = await AppState.GetEffectiveTheme();
+            _currentVersion = UpgradeService.GetCurrentVersion();
             AppState.PropertyChanged += AppState_PropertyChanged;
             CircuitConnection.MessageReceived += CircuitConnection_MessageReceived;
         }
@@ -174,8 +181,7 @@ namespace Remotely.Server.Components.Devices
                   Device.Tags,
                   Device.Alias,
                   Device.DeviceGroupID,
-                  Device.Notes,
-                  Device.WebRtcSetting);
+                  Device.Notes);
 
             ToastService.ShowToast("Device settings saved.");
 
@@ -258,14 +264,13 @@ namespace Remotely.Server.Components.Devices
 
         private void StartRemoteControl(bool viewOnly)
         {
-            var targetDevice = AgentHub.ServiceConnections.FirstOrDefault(x => x.Value.ID == Device.ID);
-            RemoteControlTargetLookup[Device.ID] = new RemoteControlTarget()
+            if (!ServiceSessionCache.TryGetConnectionId(Device.ID, out var connectionId))
             {
-                ViewOnlyMode = viewOnly,
-                ServiceConnectionId = targetDevice.Key
-            };
+                ToastService.ShowToast("Device connection not found", classString: "bg-danger");
+                return;
+            }
 
-            CircuitConnection.RemoteControl(Device.ID);
+            CircuitConnection.RemoteControl(Device.ID, viewOnly);
         }
 
         private void ToggleIsSelected(ChangeEventArgs args)
