@@ -25,16 +25,21 @@ namespace Remotely.Server.API
     [ApiController]
     public class ClientDownloadsController : ControllerBase
     {
+        private readonly IApplicationConfig _appConfig;
         private readonly IEmbeddedServerDataSearcher _embeddedDataSearcher;
-        private readonly SemaphoreSlim _fileLock = new(1,1);
+        private readonly SemaphoreSlim _fileLock = new(1, 1);
         private readonly IWebHostEnvironment _hostEnv;
-
+        private readonly ILogger<ClientDownloadsController> _logger;
         public ClientDownloadsController(
             IWebHostEnvironment hostEnv,
-            IEmbeddedServerDataSearcher embeddedDataSearcher)
+            IEmbeddedServerDataSearcher embeddedDataSearcher,
+            IApplicationConfig appConfig,
+            ILogger<ClientDownloadsController> logger)
         {
             _hostEnv = hostEnv;
             _embeddedDataSearcher = embeddedDataSearcher;
+            _appConfig = appConfig;
+            _logger = logger;
         }
 
         [HttpGet("desktop/{platformID}")]
@@ -130,7 +135,9 @@ namespace Remotely.Server.API
             var hostIndex = fileContents.IndexOf("HostName=");
             var orgIndex = fileContents.IndexOf("Organization=");
 
-            fileContents[hostIndex] = $"HostName=\"{Request.Scheme}://{Request.Host}\"";
+            var effectiveScheme = _appConfig.ForceClientHttps ? "https" : Request.Scheme;
+
+            fileContents[hostIndex] = $"HostName=\"{effectiveScheme}://{Request.Host}\"";
             fileContents[orgIndex] = $"Organization=\"{organizationId}\"";
             var fileBytes = Encoding.UTF8.GetBytes(string.Join("\n", fileContents));
             return File(fileBytes, "application/octet-stream", fileName);
@@ -138,7 +145,10 @@ namespace Remotely.Server.API
 
         private async Task<IActionResult> GetDesktopFile(string filePath, string organizationId = null)
         {
-            var serverUrl = $"{Request.Scheme}://{Request.Host}";
+            LogRequest(nameof(GetDesktopFile));
+
+            var effectiveScheme = _appConfig.ForceClientHttps ? "https" : Request.Scheme;
+            var serverUrl = $"{effectiveScheme}://{Request.Host}";
             var embeddedData = new EmbeddedServerData(new Uri(serverUrl), organizationId);
             var result = await _embeddedDataSearcher.GetRewrittenStream(filePath, embeddedData);
 
@@ -152,65 +162,84 @@ namespace Remotely.Server.API
 
         private async Task<IActionResult> GetInstallFile(string organizationId, string platformID)
         {
+            LogRequest(nameof(GetInstallFile));
+
+            if (!await _fileLock.WaitAsync(TimeSpan.FromSeconds(15)))
+            {
+                return StatusCode(StatusCodes.Status408RequestTimeout);
+            }
+
             try
             {
-                if (await _fileLock.WaitAsync(TimeSpan.FromSeconds(15)))
+                switch (platformID)
                 {
-                    switch (platformID)
-                    {
-                        case "WindowsInstaller":
+                    case "WindowsInstaller":
+                        {
+                            var effectiveScheme = _appConfig.ForceClientHttps ? "https" : Request.Scheme;
+                            var serverUrl = $"{effectiveScheme}://{Request.Host}";
+                            var filePath = Path.Combine(_hostEnv.WebRootPath, "Content", "Remotely_Installer.exe");
+                            var embeddedData = new EmbeddedServerData(new Uri(serverUrl), organizationId);
+                            var result = await _embeddedDataSearcher.GetRewrittenStream(filePath, embeddedData);
+
+                            if (!result.IsSuccess)
                             {
-                                var filePath = Path.Combine(_hostEnv.WebRootPath, "Content", "Remotely_Installer.exe");
-                                var serverUrl = $"{Request.Scheme}://{Request.Host}";
-                                var embeddedData = new EmbeddedServerData(new Uri(serverUrl), organizationId);
-                                var result = await _embeddedDataSearcher.GetRewrittenStream(filePath, embeddedData);
-
-                                if (!result.IsSuccess)
-                                {
-                                    throw result.Exception;
-                                }
-
-                                return File(result.Value, "application/octet-stream", "Remotely_Installer.exe");
+                                throw result.Exception;
                             }
-                        case "ManjaroInstaller-x64":
-                            {
-                                var fileName = "Install-Manjaro-x64.sh";
 
-                                return await GetBashInstaller(fileName, organizationId);
-                            }
-                        case "UbuntuInstaller-x64":
-                            {
-                                var fileName = "Install-Ubuntu-x64.sh";
+                            return File(result.Value, "application/octet-stream", "Remotely_Installer.exe");
+                        }
+                    case "ManjaroInstaller-x64":
+                        {
+                            var fileName = "Install-Manjaro-x64.sh";
 
-                                return await GetBashInstaller(fileName, organizationId);
-                            }
-                        case "MacOSInstaller-x64":
-                            {
-                                var fileName = "Install-MacOS-x64.sh";
+                            return await GetBashInstaller(fileName, organizationId);
+                        }
+                    case "UbuntuInstaller-x64":
+                        {
+                            var fileName = "Install-Ubuntu-x64.sh";
 
-                                return await GetBashInstaller(fileName, organizationId);
-                            }
-                        case "MacOSInstaller-arm64":
-                            {
-                                var fileName = "Install-MacOS-arm64.sh";
+                            return await GetBashInstaller(fileName, organizationId);
+                        }
+                    case "MacOSInstaller-x64":
+                        {
+                            var fileName = "Install-MacOS-x64.sh";
 
-                                return await GetBashInstaller(fileName, organizationId);
-                            }
-                        default:
-                            return BadRequest();
-                    }
-                }
-                else
-                {
-                    return StatusCode(StatusCodes.Status408RequestTimeout);
+                            return await GetBashInstaller(fileName, organizationId);
+                        }
+                    case "MacOSInstaller-arm64":
+                        {
+                            var fileName = "Install-MacOS-arm64.sh";
+
+                            return await GetBashInstaller(fileName, organizationId);
+                        }
+                    default:
+                        return BadRequest();
                 }
             }
             finally
             {
-                if (_fileLock.CurrentCount == 0)
+                _fileLock.Release();
+            }
+        }
+
+        private void LogRequest(string methodName)
+        {
+            if (_appConfig.UseHttpLogging)
+            {
+                var ip = Request.HttpContext.Connection.RemoteIpAddress;
+                if (ip?.IsIPv4MappedToIPv6 == true)
                 {
-                    _fileLock.Release();
+                    ip = ip.MapToIPv4();
                 }
+
+                var effectiveScheme = _appConfig.ForceClientHttps ? "https" : Request.Scheme;
+
+                _logger.LogInformation(
+                    "Started client download via {methodName}.  Effective Scheme: {scheme}.  Effective Host: {host}.  Remote IP: {ip}.",
+                    methodName,
+                    effectiveScheme,
+                    Request.Host,
+                    $"{ip}");
             }
         }
     }

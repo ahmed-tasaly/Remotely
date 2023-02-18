@@ -101,7 +101,7 @@ namespace Remotely.Server.Services
 
         Device[] GetAllDevices(string orgID);
 
-        EventLog[] GetAllEventLogs(string orgID);
+        EventLog[] GetAllEventLogs(string username, string orgId);
 
         InviteLink[] GetAllInviteLinks(string organizationId);
 
@@ -745,7 +745,8 @@ namespace Remotely.Server.Services
                     Email = userEmail.Trim().ToLower(),
                     IsAdministrator = isAdmin,
                     OrganizationID = organizationID,
-                    UserOptions = new RemotelyUserOptions()
+                    UserOptions = new RemotelyUserOptions(),
+                    LockoutEnabled = true
                 };
                 var org = dbContext.Organizations
                     .Include(x => x.RemotelyUsers)
@@ -992,7 +993,7 @@ namespace Remotely.Server.Services
                     deviceIDs.Contains(device.ID) &&
                     (
                         remotelyUser.IsAdministrator ||
-                        device.DeviceGroup.Users.Count == 0 ||
+                        string.IsNullOrWhiteSpace(device.DeviceGroupID) ||
                         device.DeviceGroup.Users.Any(user => user.Id == remotelyUser.Id
                     )))
                 .Select(x => x.ID)
@@ -1069,12 +1070,27 @@ namespace Remotely.Server.Services
             return dbContext.Devices.Where(x => x.OrganizationID == orgID).ToArray();
         }
 
-        public EventLog[] GetAllEventLogs(string orgID)
+        public EventLog[] GetAllEventLogs(string username, string orgId)
         {
             using var dbContext = _appDbFactory.GetContext();
 
-            return dbContext.EventLogs
-                .Where(x => x.OrganizationID == orgID)
+            var query = dbContext.EventLogs
+                .AsNoTracking()
+                .AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                var user = dbContext.Users.FirstOrDefault(x => x.UserName == username);
+                if (user?.IsAdministrator == true)
+                {
+                    return query
+                        .OrderByDescending(x => x.TimeStamp)
+                        .ToArray();
+                }
+            }
+
+            return query
+                .Where(x => x.OrganizationID == orgId)
                 .OrderByDescending(x => x.TimeStamp)
                 .ToArray();
         }
@@ -1218,7 +1234,6 @@ namespace Remotely.Server.Services
                     (
                         user.IsAdministrator ||
                         string.IsNullOrWhiteSpace(x.DeviceGroupID) ||
-                        !x.DeviceGroup.Users.Any() ||
                         x.DeviceGroup.Users.Any(deviceUser => deviceUser.Id == user.Id)
                     ));
         }
@@ -1248,7 +1263,6 @@ namespace Remotely.Server.Services
                     x.OrganizationID == user.OrganizationID &&
                     (
                         user.IsAdministrator ||
-                        x.Users.Count == 0 ||
                         x.Users.Any(x => x.Id == userId)
                     )
                 )
@@ -1310,7 +1324,6 @@ namespace Remotely.Server.Services
                     (
                         user.IsAdministrator ||
                         string.IsNullOrWhiteSpace(x.DeviceGroupID) ||
-                        !x.DeviceGroup.Users.Any() ||
                         x.DeviceGroup.Users.Any(deviceUser => deviceUser.Id == user.Id)
                     ))
                 .Select(x => x.ID);

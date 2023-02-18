@@ -44,6 +44,9 @@ namespace Remotely.Server.Pages
         [Display(Name = "Enforce Attended Access")]
         public bool EnforceAttendedAccess { get; set; }
 
+        [Display(Name = "Force Client HTTPS")]
+        public bool ForceClientHttps { get; set; }
+
         [Display(Name = "Known Proxies")]
         public List<string> KnownProxies { get; set; } = new();
 
@@ -103,6 +106,9 @@ namespace Remotely.Server.Pages
 
         [Display(Name = "Use HSTS")]
         public bool UseHsts { get; set; }
+
+        [Display(Name = "Use HTTP Logging")]
+        public bool UseHttpLogging { get; set; }
     }
 
     public class ConnectionStringsModel

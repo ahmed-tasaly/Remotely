@@ -27,19 +27,21 @@ docker run -d --name remotely --restart unless-stopped -p 5000:5000 -v /var/www/
 ```
 
 ## Important: HTTPS and Reverse Proxies
-When using a reverse proxy, Remotely uses forwarded headers to determine the scheme (http/https) and host (server URL) to embed in the installers and remote control files when they are downloaded.  To avoid injection attacks, ASP.NET Core defaults to only accepting forwarded headers from loopback addresses.
+The only supported reverse proxy is Caddy, and only when it is directly facing the internet.  The default configuration for Caddy provides everything that ASP.NET Core and SignalR need to function correctly.
 
-Remotely will also add the default Docker host IP (172.17.0.1).
+If you are having networking issues with any other setup, such as with an additional firewall or with Nginx, please seek out community support in the Discussions tab, on Reddit, or another social site.  The Remotely maintainers simply can't provide guidance and support for all the possible environment setups.
 
-**If you are using a non-default configuration, you must add the reverse proxy address to the `KnownProxies` array in appsettings.json.**
+With that said, Remotely requires the following headers to be set: `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For`.  These correlate to the scheme (http/https), the URL of the original request, and the client's IP address, respectively.  The resulting scheme and host are injected into the installers and desktop clients, so they know where to send requests.  The client IP address is used in the device info.
 
-Remotely will not work if it receives forwarded requests from addresses that aren't in that list.
+The Remotely code does not parse or handle these values.  It is done internally by ASP.NET Core's built-in middleware.  If the values are not appearing as expected, it is because the headers were missing, didn't contain the correct values, were not the correct format, or didn't come through a chain of known proxies (see below).
+
+To avoid injection attacks, ASP.NET Core defaults to only accepting forwarded headers from loopback addresses.  Remotely will also add the default Docker host IP (172.17.0.1).  If you are using a non-default configuration, you must add all fireawll and reverse proxy addresses to the `KnownProxies` array in appsettings.json.
 
 ## After Installation
 - Data for Remotely will be saved in `/var/www/remotely/` within two files: appsettings.json and Remotely.db.
   - These files will persist through teardown and setup of new Remotely containers.
   - If upgrading from a non-Docker version of Remotely, overwrite these files with the ones from your previous installation.
-- Use a reverse proxy like Nginx or Caddy if you want to expose the site to the internet.
+- Use Caddy as a reverse proxy if you want to expose the site to the internet.
 - If this is the first run, create your account by clicking the `Register` button on the main page.
   - This account will be both the server admin and organization admin.
   - An organization is automatically created for the account.
@@ -49,7 +51,6 @@ Remotely will not work if it receives forwarded requests from addresses that are
     - People will no longer be able to create accounts on their own.
     - To allow self-registration, increase the `MaxOrganizationCount` or set it to -1 (see Configuration section).
 
-
 ## Update the Docker Container
 ```
 docker stop remotely
@@ -57,6 +58,13 @@ docker rm remotely
 docker pull immybot/remotely:latest
 docker run -d --name remotely --restart unless-stopped -p 5000:5000 -v /var/www/remotely:/remotely-data immybot/remotely:latest
 ```
+
+## HTTP Logging
+You can enable HTTP logging to see all requests and responses in the server logs, including headers.  This can be helpful for debugging reverse proxy, API, or SignalR issues.  The option can be enabled it `appsettings.json` or the Server Config page.
+
+You must explicitly set a log level for `Microsoft.AspNetCore.HttpLogging.HttpLoggingMiddleware` for this to work.  See the [appsettings.json](https://github.com/immense/Remotely/blob/master/Server/appsettings.json) file for an example.
+
+After changing the above, you must restart the container for the changes to take effect.
 
 ## Alternative Hosting Methods
 Starting in 2023, Docker will be the only supported way of hosting Remotely.  Given the number of Linux distributions and other enviromental unknowns, it will be easier to create a consistently reliable deployment process if we focus on Docker.  Also, the server is now able to dynamically embed the server/organization data into the EXE while it's downloading, so hard-coding the information in a custom build is no longer necessary.
@@ -116,12 +124,6 @@ However, the clients will need to have been built from source with the server UR
 ## Configuration
 The following settings are available in appsettings.json, under the ApplicationOptions section.
 
-When deployed to production, the application will use the `appsettings.Production.json` file, if it's present. To retain your settings between upgrades, copy your `appsettings.json` file to `appsettings.Production.json` on your production server, then make your configuration changes.
-
-Likewise, `appsettings.Development.json` can be used while developing in Visual Studio to override the other.
-
-Whenever there's a reference to `appsettings.json` in this document, it refers to whichever file is currently being used.
-
 For more information on configuring ASP.NET Core, see https://docs.microsoft.com/en-us/aspnet/core/fundamentals/configuration/.
 
 * AllowApiLogin: Whether to allow logging in via the API controller.  API access tokens are recommended over this approach.
@@ -142,12 +144,14 @@ For more information on configuring ASP.NET Core, see https://docs.microsoft.com
 * Theme: The color theme to use for the site.  Values are "Light" or "Dark".  This can also be configured per-user in Account - Options.
 * TrustedCorsOrigins: For cross-origin API requests via JavaScript.  The websites listed in this array with be allowed to make requests to the API.  This does not grant authentication, which is still required on most endpoints.
 * UseHsts: Whether ASP.NET Core will use HTTP Strict Transport Security.
+* UseHttpLogging: Enables logging for all HTTP requests.  Also enables additional log entries in `ClientDownloadsController` regarding the effective scheme, host, and remote IP address as a result of processing forwarded headers.
+    * You must explicitly set a log level for `Microsoft.AspNetCore.HttpLogging.HttpLoggingMiddleware` for this to work.  See the [appsettings.json](https://github.com/immense/Remotely/blob/master/Server/appsettings.json) for an example.
 
 
 ## Changing the Database
 By default, Remotely uses a SQLite database.  When first run, it creates a file as specified for the SQLite connection string in appsettings.json.
 
-You can change database by changing `DBProvider` in `ApplicationOptions` to `SQLServer` or `PostgreSQL`.  Be sure to set the connection string for the new database provider in the server's `appsettings.Production.json`.
+You can change database by changing `DBProvider` in `ApplicationOptions` to `SQLServer` or `PostgreSQL`.
 
 ## Logging
 * On clients, logs are kept in %temp%\Remotely_Logs.log.
