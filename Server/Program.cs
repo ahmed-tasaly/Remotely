@@ -34,15 +34,17 @@ using Immense.RemoteControl.Server.Abstractions;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Remotely.Shared.Services;
 using System;
+using Immense.RemoteControl.Server.Services;
+using Serilog;
+using Nihs.SimpleMessenger;
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
 var services = builder.Services;
 
-builder.Logging.ClearProviders();
+ConfigureSerilog(builder);
+
 builder.Logging.AddConfiguration(builder.Configuration.GetSection("Logging"));
-builder.Logging.AddConsole();
-builder.Logging.AddDebug();
 
 if (OperatingSystem.IsWindows() &&
     bool.TryParse(builder.Configuration["ApplicationOptions:EnableWindowsEventLog"], out var enableEventLog) &&
@@ -110,16 +112,21 @@ services.AddRazorPages();
 services.AddServerSideBlazor();
 services.AddScoped<AuthenticationStateProvider, RevalidatingIdentityAuthenticationStateProvider<RemotelyUser>>();
 services.AddDatabaseDeveloperPageExceptionFilter();
-services.AddHttpLogging(options =>
+
+if (bool.TryParse(configuration["ApplicationOptions:UseHttpLogging"], out var useHttpLogging) &&
+    useHttpLogging)
 {
-    options.RequestHeaders.Add("X-Forwarded-For");
-    options.RequestHeaders.Add("X-Forwarded-Proto");
-    options.RequestHeaders.Add("X-Forwarded-Host");
-    options.RequestHeaders.Add("X-Original-For");
-    options.RequestHeaders.Add("X-Original-Proto");
-    options.RequestHeaders.Add("X-Original-Host");
-    options.RequestHeaders.Add("Host");
-});
+    services.AddHttpLogging(options =>
+    {
+        options.RequestHeaders.Add("X-Forwarded-For");
+        options.RequestHeaders.Add("X-Forwarded-Proto");
+        options.RequestHeaders.Add("X-Forwarded-Host");
+        options.RequestHeaders.Add("X-Original-For");
+        options.RequestHeaders.Add("X-Original-Proto");
+        options.RequestHeaders.Add("X-Original-Host");
+        options.RequestHeaders.Add("Host");
+    });
+}
 
 var trustedOrigins = configuration.GetSection("ApplicationOptions:TrustedCorsOrigins").Get<string[]>();
 
@@ -157,6 +164,7 @@ services.Configure<ForwardedHeadersOptions>(options =>
 services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+    options.MaximumParallelInvocationsPerClient = 5;
     options.MaximumReceiveMessageSize = 100_000;
 })
     .AddJsonProtocol(options =>
@@ -179,15 +187,16 @@ services.AddScoped<IAppDbFactory, AppDbFactory>();
 services.AddTransient<IDataService, DataService>();
 services.AddSingleton<IApplicationConfig, ApplicationConfig>();
 services.AddScoped<ApiAuthorizationFilter>();
+services.AddScoped<LocalOnlyFilter>();
 services.AddScoped<ExpiringTokenFilter>();
-services.AddHostedService<DbCleanupService>();
+services.AddHostedService<DataCleanupService>();
 services.AddHostedService<ScriptScheduler>();
-services.AddHostedService<DesktopHubSessionCleanup>();
 services.AddSingleton<IUpgradeService, UpgradeService>();
 services.AddScoped<IToastService, ToastService>();
 services.AddScoped<IModalService, ModalService>();
 services.AddScoped<IJsInterop, JsInterop>();
 services.AddScoped<ICircuitConnection, CircuitConnection>();
+services.AddScoped<ILoaderService, LoaderService>();
 services.AddScoped(x => (CircuitHandler)x.GetRequiredService<ICircuitConnection>());
 services.AddSingleton<ICircuitManager, CircuitManager>();
 services.AddScoped<IAuthService, AuthService>();
@@ -196,18 +205,16 @@ services.AddScoped<IExpiringTokenService, ExpiringTokenService>();
 services.AddScoped<IScriptScheduleDispatcher, ScriptScheduleDispatcher>();
 services.AddSingleton<IOtpProvider, OtpProvider>();
 services.AddSingleton<IEmbeddedServerDataSearcher, EmbeddedServerDataSearcher>();
+services.AddSingleton<ILogsManager, LogsManager>();
+services.AddSingleton(WeakReferenceMessenger.Default);
 
 services.AddRemoteControlServer(config =>
 {
-    config.AddHubEventHandler<HubEventHandlerEx>();
+    config.AddHubEventHandler<HubEventHandler>();
     config.AddViewerAuthorizer<ViewerAuthorizer>();
-    config.AddViewerHubDataProvider<ViewerHubDataProvider>();
     config.AddViewerPageDataProvider<ViewerPageDataProvider>();
 });
 
-services.RemoveAll<IHubEventHandler>();
-services.AddScoped<IHubEventHandlerEx, HubEventHandlerEx>();
-services.AddScoped<IHubEventHandler>(s => s.GetRequiredService<IHubEventHandlerEx>());
 services.AddSingleton<IServiceHubSessionCache, ServiceHubSessionCache>();
 
 var app = builder.Build();
@@ -255,29 +262,24 @@ app.UseCors("TrustedOriginPolicy");
 
 app.UseRemoteControlServer();
 
-app.UseEndpoints(endpoints =>
-{
-    endpoints.MapHub<ServiceHub>("/hubs/service");
-    endpoints.MapControllers();
-    endpoints.MapBlazorHub();
-    endpoints.MapFallbackToPage("/_Host");
-});
+
+app.MapHub<AgentHub>("/hubs/service");
+app.MapControllers();
+app.MapBlazorHub();
+app.MapFallbackToPage("/_Host");
 
 using (var scope = app.Services.CreateScope())
 {
     using var context = scope.ServiceProvider.GetRequiredService<AppDb>();
     var dataService = scope.ServiceProvider.GetRequiredService<IDataService>();
-    var loggerFactory = scope.ServiceProvider.GetRequiredService<ILoggerFactory>();
 
     if (context.Database.IsRelational())
     {
         context.Database.Migrate();
     }
 
-    dataService.SetAllDevicesNotOnline();
+    await dataService.SetAllDevicesNotOnline();
     dataService.CleanupOldRecords();
-
-    loggerFactory.AddProvider(new DbLoggerProvider(app.Environment, app.Services));
 }
 
 await app.RunAsync();
@@ -316,5 +318,47 @@ void ConfigureStaticFiles()
             RequestPath = new PathString("/.well-known"),
             ServeUnknownFileTypes = true
         });
+    }
+}
+
+void ConfigureSerilog(WebApplicationBuilder webAppBuilder)
+{
+    try
+    {
+        var dataRetentionDays = 7;
+        if (int.TryParse(webAppBuilder.Configuration["ApplicationOptions:DataRetentionInDays"], out var retentionSetting))
+        {
+            dataRetentionDays = retentionSetting;
+        }
+
+        var logPath = LogsManager.DefaultLogsDirectory;
+
+        void ApplySharedLoggerConfig(LoggerConfiguration loggerConfiguration)
+        {
+            loggerConfiguration
+                .Enrich.FromLogContext()
+                .WriteTo.Console()
+                .WriteTo.File($"{logPath}/Remotely_Server.log", 
+                    rollingInterval: RollingInterval.Day, 
+                    retainedFileTimeLimit: TimeSpan.FromDays(dataRetentionDays),
+                    shared: true);
+        }
+
+        var loggerConfig = new LoggerConfiguration();
+        ApplySharedLoggerConfig(loggerConfig);
+        Log.Logger = loggerConfig.CreateBootstrapLogger();
+
+        builder.Host.UseSerilog((context, services, configuration) =>
+        {
+            configuration
+                .ReadFrom.Configuration(context.Configuration)
+                .ReadFrom.Services(services);
+
+            ApplySharedLoggerConfig(configuration);
+        });
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Failed to configure Serilog file logging.  Error: {ex.Message}");
     }
 }

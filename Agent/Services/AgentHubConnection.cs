@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.SignalR.Client;
+﻿using Immense.RemoteControl.Desktop.Native.Windows;
+using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remotely.Agent.Extensions;
@@ -6,8 +7,6 @@ using Remotely.Agent.Interfaces;
 using Remotely.Shared.Enums;
 using Remotely.Shared.Models;
 using Remotely.Shared.Services;
-using Remotely.Shared.Utilities;
-using Remotely.Shared.Win32;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -95,7 +94,7 @@ namespace Remotely.Agent.Services
 
                     _hubConnection = new HubConnectionBuilder()
                         .WithUrl(_connectionInfo.Host + "/hubs/service")
-                        .WithAutomaticReconnect(new RetryPolicy())
+                        .WithAutomaticReconnect(new RetryPolicy(_logger))
                         .AddMessagePackProtocol()
                         .Build();
 
@@ -107,6 +106,7 @@ namespace Remotely.Agent.Services
 
                     _logger.LogInformation("Connected to server.");
 
+                    // TODO: Move CPU sampler to background service.
                     var device = await _deviceInfoService.CreateDevice(_connectionInfo.DeviceID, _connectionInfo.OrganizationID);
 
                     var result = await _hubConnection.InvokeAsync<bool>("DeviceCameOnline", device);
@@ -132,6 +132,7 @@ namespace Remotely.Agent.Services
                         continue;
                     }
 
+                    // TODO: Move to background service.
                     _heartbeatTimer?.Dispose();
                     _heartbeatTimer = new Timer(TimeSpan.FromMinutes(5).TotalMilliseconds);
                     _heartbeatTimer.Elapsed += HeartbeatTimer_Elapsed;
@@ -487,10 +488,7 @@ namespace Remotely.Agent.Services
                 }
             });
 
-            _hubConnection.On("TriggerHeartbeat", async () =>
-            {
-                await SendHeartbeat().ConfigureAwait(false);
-            });
+            _hubConnection.On("TriggerHeartbeat", SendHeartbeat);
         }
 
         private async Task<bool> VerifyServer()
@@ -522,6 +520,13 @@ namespace Remotely.Agent.Services
 
         private class RetryPolicy : IRetryPolicy
         {
+            private readonly ILogger<AgentHubConnection> _logger;
+
+            public RetryPolicy(ILogger<AgentHubConnection> logger) 
+            {
+                _logger = logger;
+            }
+
             public TimeSpan? NextRetryDelay(RetryContext retryContext)
             {
                 if (retryContext.PreviousRetryCount == 0)
@@ -529,7 +534,8 @@ namespace Remotely.Agent.Services
                     return TimeSpan.FromSeconds(3);
                 }
 
-                var waitSeconds = Math.Min(30, retryContext.PreviousRetryCount * 5);
+                var waitSeconds = Random.Shared.Next(3, 10);
+                _logger.LogDebug("Attempting to reconnect in {seconds} seconds.", waitSeconds);
                 return TimeSpan.FromSeconds(waitSeconds);
             }
         }

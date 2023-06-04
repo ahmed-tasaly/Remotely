@@ -28,7 +28,6 @@ namespace Remotely.Server.Data
         public DbSet<BrandingInfo> BrandingInfos { get; set; }
         public DbSet<DeviceGroup> DeviceGroups { get; set; }
         public DbSet<Device> Devices { get; set; }
-        public DbSet<EventLog> EventLogs { get; set; }
         public DbSet<InviteLink> InviteLinks { get; set; }
         public DbSet<Organization> Organizations { get; set; }
         public DbSet<ScriptRun> ScriptRuns { get; set; }
@@ -42,7 +41,7 @@ namespace Remotely.Server.Data
         protected override void OnConfiguring(DbContextOptionsBuilder options)
         {
             options.ConfigureWarnings(x => x.Ignore(RelationalEventId.MultipleCollectionIncludeWarning));
-            options.LogTo((message) => System.Diagnostics.Debug.Write(message));
+            //options.LogTo((message) => System.Diagnostics.Debug.Write(message));
         }
 
         protected override void OnModelCreating(ModelBuilder builder)
@@ -57,9 +56,6 @@ namespace Remotely.Server.Data
                 .WithOne(x => x.Organization);
             builder.Entity<Organization>()
                 .HasMany(x => x.RemotelyUsers)
-                .WithOne(x => x.Organization);
-            builder.Entity<Organization>()
-                .HasMany(x => x.EventLogs)
                 .WithOne(x => x.Organization);
             builder.Entity<Organization>()
                 .HasMany(x => x.DeviceGroups)

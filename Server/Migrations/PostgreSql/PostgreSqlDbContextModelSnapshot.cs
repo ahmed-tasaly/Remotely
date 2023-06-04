@@ -17,7 +17,7 @@ namespace Remotely.Server.Migrations.PostgreSql
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "6.0.9")
+                .HasAnnotation("ProductVersion", "7.0.5")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -216,6 +216,8 @@ namespace Remotely.Server.Migrations.PostgreSql
                     b.ToTable("RemotelyUsers", (string)null);
 
                     b.HasDiscriminator<string>("Discriminator").HasValue("IdentityUser");
+
+                    b.UseTphMappingStrategy();
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<string>", b =>
@@ -519,37 +521,6 @@ namespace Remotely.Server.Migrations.PostgreSql
                     b.HasIndex("OrganizationID");
 
                     b.ToTable("DeviceGroups");
-                });
-
-            modelBuilder.Entity("Remotely.Shared.Models.EventLog", b =>
-                {
-                    b.Property<string>("ID")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("text");
-
-                    b.Property<int>("EventType")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Message")
-                        .HasColumnType("text");
-
-                    b.Property<string>("OrganizationID")
-                        .HasColumnType("text");
-
-                    b.Property<string>("Source")
-                        .HasColumnType("text");
-
-                    b.Property<string>("StackTrace")
-                        .HasColumnType("text");
-
-                    b.Property<DateTimeOffset>("TimeStamp")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("ID");
-
-                    b.HasIndex("OrganizationID");
-
-                    b.ToTable("EventLogs");
                 });
 
             modelBuilder.Entity("Remotely.Shared.Models.InviteLink", b =>
@@ -1045,15 +1016,6 @@ namespace Remotely.Server.Migrations.PostgreSql
                     b.Navigation("Organization");
                 });
 
-            modelBuilder.Entity("Remotely.Shared.Models.EventLog", b =>
-                {
-                    b.HasOne("Remotely.Shared.Models.Organization", "Organization")
-                        .WithMany("EventLogs")
-                        .HasForeignKey("OrganizationID");
-
-                    b.Navigation("Organization");
-                });
-
             modelBuilder.Entity("Remotely.Shared.Models.InviteLink", b =>
                 {
                     b.HasOne("Remotely.Shared.Models.Organization", "Organization")
@@ -1172,8 +1134,6 @@ namespace Remotely.Server.Migrations.PostgreSql
                     b.Navigation("DeviceGroups");
 
                     b.Navigation("Devices");
-
-                    b.Navigation("EventLogs");
 
                     b.Navigation("InviteLinks");
 

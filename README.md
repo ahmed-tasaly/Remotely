@@ -1,7 +1,7 @@
 # Remotely
-A remote control and remote scripting solution, built with .NET 6, Blazor, and SignalR Core.
+A remote control and remote scripting solution, built with .NET, Blazor, and SignalR Core.
 
-[![Build Status](https://dev.azure.com/translucency/Remotely/_apis/build/status/immense.Remotely?branchName=master)](https://dev.azure.com/translucency/Remotely/_build/latest?definitionId=32&branchName=master)
+[![Build Status](https://dev.azure.com/immybot/Remotely/_apis/build/status%2Fimmense.Remotely?branchName=master)](https://dev.azure.com/immybot/Remotely/_build/latest?definitionId=2&branchName=master)
 [![Tests](https://github.com/immense/Remotely/actions/workflows/run_tests.yml/badge.svg?branch=master)](https://github.com/immense/Remotely/actions/workflows/run_tests.yml)
 
 # Status 
@@ -16,7 +16,7 @@ ImmyBot experienced explosive growth this year and we only have 4 developers whi
 ## Project Links
 Subreddit: https://www.reddit.com/r/remotely_app/  
 Docker: https://hub.docker.com/r/immybot/remotely  
-Video Tutorials: https://remotely.one/Tutorials  
+Tutorial: https://www.youtube.com/watch?v=t-TFvr7sZ6M (Thanks, @bmcgonag!)
 
 ![image](.github/media/ask-remote.png)
 
@@ -41,6 +41,14 @@ To avoid injection attacks, ASP.NET Core defaults to only accepting forwarded he
 - Data for Remotely will be saved in `/var/www/remotely/` within two files: appsettings.json and Remotely.db.
   - These files will persist through teardown and setup of new Remotely containers.
   - If upgrading from a non-Docker version of Remotely, overwrite these files with the ones from your previous installation.
+    - In that case, please note that you may need to change _SQLite_ parameter in your non-Docker appsettings.json. You may have something like:
+      ```
+      "SQLite": "DataSource=Remotely.db",
+      ```
+      but this should be changed to reflect the new Remotely.db location (relative to the container):
+      ```
+      "SQLite": "DataSource=/remotely-data/Remotely.db",
+      ```
 - Use Caddy as a reverse proxy if you want to expose the site to the internet.
 - If this is the first run, create your account by clicking the `Register` button on the main page.
   - This account will be both the server admin and organization admin.

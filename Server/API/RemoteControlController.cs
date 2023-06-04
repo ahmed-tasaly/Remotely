@@ -15,6 +15,8 @@ using Immense.RemoteControl.Server.Services;
 using Remotely.Server.Services.RcImplementations;
 using Immense.RemoteControl.Server.Abstractions;
 using Immense.RemoteControl.Shared.Helpers;
+using Microsoft.Build.Framework;
+using Microsoft.Extensions.Logging;
 
 // For more information on enabling Web API for empty projects, visit https://go.microsoft.com/fwlink/?LinkID=397860
 
@@ -24,24 +26,26 @@ namespace Remotely.Server.API
     [ApiController]
     public class RemoteControlController : ControllerBase
     {
-        private readonly IHubContext<ServiceHub> _serviceHub;
+        private readonly IHubContext<AgentHub> _serviceHub;
         private readonly IDesktopHubSessionCache _desktopSessionCache;
         private readonly IServiceHubSessionCache _serviceSessionCache;
         private readonly IApplicationConfig _appConfig;
         private readonly IOtpProvider _otpProvider;
-        private readonly IHubEventHandlerEx _hubEvents;
+        private readonly IHubEventHandler _hubEvents;
         private readonly IDataService _dataService;
         private readonly SignInManager<RemotelyUser> _signInManager;
+        private readonly ILogger<RemoteControlController> _logger;
 
         public RemoteControlController(
             SignInManager<RemotelyUser> signInManager,
             IDataService dataService,
             IDesktopHubSessionCache desktopSessionCache,
-            IHubContext<ServiceHub> serviceHub,
+            IHubContext<AgentHub> serviceHub,
             IServiceHubSessionCache serviceSessionCache,
             IOtpProvider otpProvider,
-            IHubEventHandlerEx hubEvents,
-            IApplicationConfig appConfig)
+            IHubEventHandler hubEvents,
+            IApplicationConfig appConfig,
+            ILogger<RemoteControlController> logger)
         {
             _dataService = dataService;
             _serviceHub = serviceHub;
@@ -51,6 +55,7 @@ namespace Remotely.Server.API
             _otpProvider = otpProvider;
             _hubEvents = hubEvents;
             _signInManager = signInManager;
+            _logger = logger;
         }
 
         [HttpGet("{deviceID}")]
@@ -75,20 +80,20 @@ namespace Remotely.Server.API
             if (result.Succeeded &&
                 _dataService.DoesUserHaveAccessToDevice(rcRequest.DeviceID, _dataService.GetUserByNameWithOrg(rcRequest.Email)))
             {
-                _dataService.WriteEvent($"API login successful for {rcRequest.Email}.", orgId);
+                _logger.LogInformation("API login successful for {rcRequestEmail}.", rcRequest.Email);
                 return await InitiateRemoteControl(rcRequest.DeviceID, orgId);
             }
             else if (result.IsLockedOut)
             {
-                _dataService.WriteEvent($"API login unsuccessful due to lockout for {rcRequest.Email}.", orgId);
+                _logger.LogInformation("API login successful for {rcRequestEmail}.", rcRequest.Email);
                 return Unauthorized("Account is locked.");
             }
             else if (result.RequiresTwoFactor)
             {
-                _dataService.WriteEvent($"API login unsuccessful due to 2FA for {rcRequest.Email}.", orgId);
+                _logger.LogInformation("API login successful for {rcRequestEmail}.", rcRequest.Email);
                 return Unauthorized("Account requires two-factor authentication.");
             }
-            _dataService.WriteEvent($"API login unsuccessful due to bad attempt for {rcRequest.Email}.", orgId);
+            _logger.LogInformation("API login unsuccessful due to bad attempt for {rcRequestEmail}.", rcRequest.Email);
             return BadRequest();
         }
 
@@ -112,7 +117,7 @@ namespace Remotely.Server.API
             }
 
 
-            var sessionCount = _desktopSessionCache.Sessions.Values
+            var sessionCount = _desktopSessionCache.Sessions
                    .OfType<RemoteControlSessionEx>()
                    .Count(x => x.OrganizationId == orgID);
 
@@ -121,45 +126,45 @@ namespace Remotely.Server.API
                 return BadRequest("There are already the maximum amount of active remote control sessions for your organization.");
             }
 
-            var sessionId = Guid.NewGuid().ToString();
+            var sessionId = Guid.NewGuid();
             var accessKey = RandomGenerator.GenerateAccessKey();
 
             var session = new RemoteControlSessionEx()
             {
                 UnattendedSessionId = sessionId,
                 UserConnectionId = HttpContext.Connection.Id,
-                ServiceConnectionId = serviceConnectionId,
+                AgentConnectionId = serviceConnectionId,
                 DeviceId = deviceID,
                 OrganizationId = orgID
             };
 
-            _desktopSessionCache.Sessions.AddOrUpdate(sessionId, session, (k, v) =>
+            _desktopSessionCache.AddOrUpdate($"{sessionId}", session, (k, v) =>
             {
                 if (v is RemoteControlSessionEx ex)
                 {
-                    ex.ServiceConnectionId = HttpContext.Connection.Id;
+                    ex.AgentConnectionId = HttpContext.Connection.Id;
                     return ex;
                 }
+                v.Dispose();
                 return session;
             });
 
             var orgName = _dataService.GetOrganizationNameById(orgID);
-            Task CreateSessionFunc()
-            {
-                return _serviceHub.Clients.Client(serviceConnectionId).SendAsync("RemoteControl", 
-                    sessionId,
-                    accessKey,
-                    HttpContext.Connection.Id,
-                    string.Empty,
-                    orgName);
 
-            }
+            await _serviceHub.Clients.Client(serviceConnectionId).SendAsync("RemoteControl", 
+                sessionId,
+                accessKey,
+                HttpContext.Connection.Id,
+                string.Empty,
+                orgName,
+                orgID);
 
-            if (!await _hubEvents.TryWaitForSession(sessionId, CreateSessionFunc))
+            var waitResult = await session.WaitForSessionReady(TimeSpan.FromSeconds(30));
+            if (!waitResult)
             {
                 return StatusCode(408, "The remote control process failed to start in time on the remote device.");
             }
-
+           
             var otp = _otpProvider.GetOtp(targetDevice.ID);
 
             return Ok($"{HttpContext.Request.Scheme}://{Request.Host}/RemoteControl/Viewer?mode=Unattended&sessionId={sessionId}&accessKey={accessKey}&otp={otp}");

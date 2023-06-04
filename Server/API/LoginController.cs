@@ -3,6 +3,8 @@ using Immense.RemoteControl.Server.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Build.Framework;
+using Microsoft.Extensions.Logging;
 using Remotely.Server.Hubs;
 using Remotely.Server.Models;
 using Remotely.Server.Services;
@@ -24,6 +26,7 @@ namespace Remotely.Server.API
         private readonly IDesktopHubSessionCache _desktopSessionCache;
         private readonly SignInManager<RemotelyUser> _signInManager;
         private readonly IHubContext<ViewerHub> _viewerHub;
+        private readonly ILogger<LoginController> _logger;
 
         public LoginController(
             SignInManager<RemotelyUser> signInManager,
@@ -31,7 +34,8 @@ namespace Remotely.Server.API
             IApplicationConfig appConfig,
             IHubContext<DesktopHub> casterHubContext,
             IDesktopHubSessionCache desktopSessionCache,
-            IHubContext<ViewerHub> viewerHubContext)
+            IHubContext<ViewerHub> viewerHubContext,
+            ILogger<LoginController> logger)
         {
             _signInManager = signInManager;
             _dataService = dataService;
@@ -39,6 +43,7 @@ namespace Remotely.Server.API
             _desktopHub = casterHubContext;
             _desktopSessionCache = desktopSessionCache;
             _viewerHub = viewerHubContext;
+            _logger = logger;
         }
 
         [HttpGet("Logout")]
@@ -49,15 +54,18 @@ namespace Remotely.Server.API
             if (HttpContext?.User?.Identity?.IsAuthenticated == true)
             {
                 orgId = _dataService.GetUserByNameWithOrg(HttpContext.User.Identity.Name)?.OrganizationID;
-                var activeSessions = _desktopSessionCache.Sessions.Where(x => x.Value.RequesterUserName == HttpContext.User.Identity.Name);
-                foreach (var session in activeSessions.ToList())
+                var activeSessions = _desktopSessionCache
+                    .Sessions
+                    .Where(x => x.RequesterUserName == HttpContext.User.Identity.Name);
+
+                foreach (var session in activeSessions)
                 {
-                    await _desktopHub.Clients.Client(session.Value.DesktopConnectionId).SendAsync("Disconnect", "User logged out.");
-                    await _viewerHub.Clients.Clients(session.Value.ViewerList).SendAsync("ConnectionFailed");
+                    await _desktopHub.Clients.Client(session.DesktopConnectionId).SendAsync("Disconnect", "User logged out.");
+                    await _viewerHub.Clients.Clients(session.ViewerList).SendAsync("ConnectionFailed");
                 }
             }
             await _signInManager.SignOutAsync();
-            _dataService.WriteEvent($"API logout successful for {HttpContext?.User?.Identity?.Name}.", orgId);
+            _logger.LogInformation("API logout successful for {userName}.", HttpContext?.User?.Identity?.Name);
             return Ok();
         }
 
@@ -74,20 +82,20 @@ namespace Remotely.Server.API
             var result = await _signInManager.PasswordSignInAsync(login.Email, login.Password, false, true);
             if (result.Succeeded)
             {
-                _dataService.WriteEvent($"API login successful for {login.Email}.", orgId);
+                _logger.LogInformation("API login successful for {loginEmail}.", login.Email);
                 return Ok();
             }
             else if (result.IsLockedOut)
             {
-                _dataService.WriteEvent($"API login unsuccessful due to lockout for {login.Email}.", orgId);
+                _logger.LogInformation("API login unsuccessful due to lockout for {loginEmail}.", login.Email);
                 return Unauthorized("Account is locked.");
             }
             else if (result.RequiresTwoFactor)
             {
-                _dataService.WriteEvent($"API login unsuccessful due to 2FA for {login.Email}.", orgId);
+                _logger.LogInformation("API login unsuccessful due to 2FA for {loginEmail}.", login.Email);
                 return Unauthorized("Account requires two-factor authentication.");
             }
-            _dataService.WriteEvent($"API login unsuccessful due to bad attempt for {login.Email}.", orgId);
+            _logger.LogInformation("API login unsuccessful due to bad attempt for {loginEmail}.", login.Email);
             return BadRequest();
         }
     }
