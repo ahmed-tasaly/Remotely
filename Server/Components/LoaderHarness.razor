@@ -1,6 +1,6 @@
-﻿@using Nihs.SimpleMessenger;
+﻿@using Immense.SimpleMessenger;
 @using Remotely.Server.Models.Messages;
-@inject IMessenger Messenger
+@inherits MessengerSubscriber
 
 @if (_loaderShown)
 {
@@ -11,16 +11,13 @@
     private bool _loaderShown;
     private string _statusMessage = string.Empty;
 
-    protected override Task OnAfterRenderAsync(bool firstRender)
+    protected override async Task OnInitializedAsync()
     {
-        if (firstRender)
-        {
-            Messenger.Register<ShowLoaderMessage>(this, HandleShowLoaderMessage);
-        }
-        return base.OnAfterRenderAsync(firstRender);
+        await base.OnInitializedAsync();
+        await Register<ShowLoaderMessage>(HandleShowLoaderMessage);
     }
 
-    private async Task HandleShowLoaderMessage(ShowLoaderMessage message)
+    private async Task HandleShowLoaderMessage(object subscriber, ShowLoaderMessage message)
     {
         _loaderShown = message.IsShown;
         _statusMessage = message.StatusMessage;

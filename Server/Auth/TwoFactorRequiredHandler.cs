@@ -1,37 +1,39 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Remotely.Server.Services;
-using Remotely.Shared.Models;
+using Remotely.Shared.Entities;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace Remotely.Server.Auth
+namespace Remotely.Server.Auth;
+
+public class TwoFactorRequiredHandler : AuthorizationHandler<TwoFactorRequiredRequirement>
 {
-    public class TwoFactorRequiredHandler : AuthorizationHandler<TwoFactorRequiredRequirement>
+    private readonly IDataService _dataService;
+
+    public TwoFactorRequiredHandler(IDataService dataService)
     {
-        private readonly UserManager<RemotelyUser> _userManager;
-        private readonly IApplicationConfig _appConfig;
+        _dataService = dataService;
+    }
 
-        public TwoFactorRequiredHandler(UserManager<RemotelyUser> userManager, IApplicationConfig appConfig)
+    protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, TwoFactorRequiredRequirement requirement)
+    {
+        var settings = await _dataService.GetSettings();
+        if (context.User.Identity?.IsAuthenticated == true &&
+            context.User.Identity.Name is not null &&
+            settings.Require2FA)
         {
-            _userManager = userManager;
-            _appConfig = appConfig;
-        }
+            var userResult = await _dataService.GetUserByName(context.User.Identity.Name);
 
-        protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, TwoFactorRequiredRequirement requirement)
-        {
-            if (context.User.Identity.IsAuthenticated && _appConfig.Require2FA)
+            if (!userResult.IsSuccess ||
+                !userResult.Value.TwoFactorEnabled)
             {
-                var user = await _userManager.GetUserAsync(context.User);
-                if (!user.TwoFactorEnabled)
-                {
-                    context.Fail();
-                    return;
-                }
+                context.Fail();
+                return;
             }
-            context.Succeed(requirement);
         }
+        context.Succeed(requirement);
     }
 }

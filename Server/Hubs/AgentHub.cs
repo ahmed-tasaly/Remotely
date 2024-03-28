@@ -1,154 +1,174 @@
 ﻿using Immense.RemoteControl.Server.Hubs;
+using Immense.RemoteControl.Server.Services;
+using Immense.SimpleMessenger;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Remotely.Server.Models;
+using Remotely.Server.Models.Messages;
 using Remotely.Server.Services;
 using Remotely.Shared;
+using Remotely.Shared.Dtos;
+using Remotely.Shared.Entities;
 using Remotely.Shared.Enums;
+using Remotely.Shared.Interfaces;
 using Remotely.Shared.Models;
 using Remotely.Shared.Utilities;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace Remotely.Server.Hubs
+namespace Remotely.Server.Hubs;
+
+public class AgentHub : Hub<IAgentHubClient>
 {
-    public class AgentHub : Hub
+    private readonly IDataService _dataService;
+    private readonly ICircuitManager _circuitManager;
+    private readonly IExpiringTokenService _expiringTokenService;
+    private readonly ILogger<AgentHub> _logger;
+    private readonly IMessenger _messenger;
+    private readonly IRemoteControlSessionCache _remoteControlSessions;
+    private readonly IAgentHubSessionCache _serviceSessionCache;
+    private readonly IHubContext<ViewerHub> _viewerHubContext;
+
+    public AgentHub(
+        IDataService dataService,
+        IAgentHubSessionCache serviceSessionCache,
+        IHubContext<ViewerHub> viewerHubContext,
+        ICircuitManager circuitManager,
+        IExpiringTokenService expiringTokenService,
+        IRemoteControlSessionCache remoteControlSessionCache,
+        IMessenger messenger,
+        ILogger<AgentHub> logger)
     {
-        private readonly IApplicationConfig _appConfig;
-        private readonly ICircuitManager _circuitManager;
-        private readonly IDataService _dataService;
-        private readonly IExpiringTokenService _expiringTokenService;
-        private readonly ILogger<AgentHub> _logger;
-        private readonly IServiceHubSessionCache _serviceSessionCache;
-        private readonly IHubContext<ViewerHub> _viewerHubContext;
+        _dataService = dataService;
+        _serviceSessionCache = serviceSessionCache;
+        _viewerHubContext = viewerHubContext;
+        _circuitManager = circuitManager;
+        _expiringTokenService = expiringTokenService;
+        _remoteControlSessions = remoteControlSessionCache;
+        _messenger = messenger;
+        _logger = logger;
+    }
 
-        public AgentHub(IDataService dataService,
-            IApplicationConfig appConfig,
-            IServiceHubSessionCache serviceSessionCache,
-            IHubContext<ViewerHub> viewerHubContext,
-            ICircuitManager circuitManager,
-            IExpiringTokenService expiringTokenService,
-            ILogger<AgentHub> logger)
+    // TODO: Replace with new invoke capability in .NET 7 in ScriptingController.
+    public static IMemoryCache ApiScriptResults { get; } = new MemoryCache(new MemoryCacheOptions());
+
+    private Device? Device
+    {
+        get
         {
-            _dataService = dataService;
-            _serviceSessionCache = serviceSessionCache;
-            _viewerHubContext = viewerHubContext;
-            _appConfig = appConfig;
-            _circuitManager = circuitManager;
-            _expiringTokenService = expiringTokenService;
-            _logger = logger;
+            if (Context.Items["Device"] is Device device)
+            {
+                return device;
+            }
+            _logger.LogWarning("Device has not been set in the context items.");
+            return null;
+        }
+        set
+        {
+            Context.Items["Device"] = value;
+        }
+    }
+
+    public async Task Chat(string messageText, bool disconnected, string browserConnectionId)
+    {
+        if (Device is null)
+        {
+            return;
         }
 
-        // TODO: Replace with new invoke capability in .NET 7 in ScriptingController.
-        public static IMemoryCache ApiScriptResults { get; } = new MemoryCache(new MemoryCacheOptions());
-
-        private Device Device
+        if (_circuitManager.TryGetConnection(browserConnectionId, out _))
         {
-            get
-            {
-                return Context.Items["Device"] as Device;
-            }
-            set
-            {
-                Context.Items["Device"] = value;
-            }
+            var message = new ChatReceivedMessage(Device.ID, $"{Device.DeviceName}", messageText, disconnected);
+            await _messenger.Send(message, browserConnectionId);
         }
-
-        public Task Chat(string message, bool disconnected, string browserConnectionId)
+        else
         {
-            if (_circuitManager.TryGetConnection(browserConnectionId, out var connection))
-            {
-                return connection.InvokeCircuitEvent(CircuitEventName.ChatReceived, Device.ID, Device.DeviceName, message, disconnected);
-            }
-            else
-            {
-                return Clients.Caller.SendAsync("Chat", string.Empty, string.Empty, string.Empty, true, browserConnectionId);
-            }
+            await Clients.Caller.SendChatMessage(
+                senderName: string.Empty,
+                message: string.Empty,
+                orgName: string.Empty,
+                orgId: string.Empty,
+                disconnected: true,
+                senderConnectionId: browserConnectionId);
         }
+    }
 
-
-        public async Task CheckForPendingSriptRuns()
+    public async Task CheckForPendingRemoteControlSessions()
+    {
+        try
         {
-            var authToken = _expiringTokenService.GetToken(Time.Now.AddMinutes(AppConstants.ScriptRunExpirationMinutes));
-            var scriptRuns = await _dataService.GetPendingScriptRuns(Device.ID);
-            foreach (var run in scriptRuns)
-            {
-                await Clients.Caller.SendAsync("RunScript",
-                    run.SavedScriptId,
-                    run.Id,
-                    run.Initiator,
-                    run.InputType,
-                    authToken);
-            }
-        }
-
-        public async Task<bool> DeviceCameOnline(Device device)
-        {
-            try
-            {
-                if (CheckForDeviceBan(device.ID, device.DeviceName))
-                {
-                    return false;
-                }
-
-                var ip = Context.GetHttpContext()?.Connection?.RemoteIpAddress;
-                if (ip != null && ip.IsIPv4MappedToIPv6)
-                {
-                    ip = ip.MapToIPv4();
-                }
-                device.PublicIP = ip?.ToString();
-
-                if (CheckForDeviceBan(device.PublicIP))
-                {
-                    return false;
-                }
-
-                var result = await _dataService.AddOrUpdateDevice(device);
-                if (result.IsSuccess)
-                {
-                    Device = result.Value;
-
-                    _serviceSessionCache.AddOrUpdateByConnectionId(Context.ConnectionId, Device);
-
-                    var userIDs = _circuitManager.Connections.Select(x => x.User.Id);
-
-                    var filteredUserIDs = _dataService.FilterUsersByDevicePermission(userIDs, Device.ID);
-
-                    var connections = _circuitManager.Connections
-                        .Where(x => x.User.OrganizationID == Device.OrganizationID &&
-                            filteredUserIDs.Contains(x.User.Id));
-
-                    foreach (var connection in connections)
-                    {
-                        await connection.InvokeCircuitEvent(CircuitEventName.DeviceUpdate, Device);
-                    }
-                    return true;
-                }
-                else
-                {
-                    // Organization wasn't found.
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error while setting device to online status.");
-            }
-
-            Context.Abort();
-            return false;
-        }
-
-        public async Task DeviceHeartbeat(Device device)
-        {
-            if (CheckForDeviceBan(device.ID, device.DeviceName))
+            if (Device is null)
             {
                 return;
+            }
+
+            _logger.LogDebug(
+                "Checking for pending remote control sessions for device {deviceId}.",
+                Device.ID);
+
+            var waitingSessions = _remoteControlSessions
+                .Sessions
+                .OfType<RemoteControlSessionEx>()
+                .Where(x => x.DeviceId == Device.ID);
+
+            foreach (var session in waitingSessions)
+            {
+                _logger.LogDebug(
+                    "Restarting remote control session {sessionId}.",
+                    session.UnattendedSessionId);
+
+                session.AgentConnectionId = Context.ConnectionId;
+                await Clients.Caller.RestartScreenCaster(
+                    session.ViewerList.ToArray(),
+                    $"{session.UnattendedSessionId}",
+                    session.AccessKey,
+                    session.UserConnectionId,
+                    session.RequesterName,
+                    session.OrganizationName,
+                    session.OrganizationId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while checking for pending remote control sessions.");
+        }
+    }
+
+    public async Task CheckForPendingScriptRuns()
+    {
+        if (Device is null)
+        {
+            return;
+        }
+
+        var authToken = _expiringTokenService.GetToken(Time.Now.AddMinutes(AppConstants.ScriptRunExpirationMinutes));
+        var scriptRuns = await _dataService.GetPendingScriptRuns(Device.ID);
+
+        foreach (var run in scriptRuns)
+        {
+            if (run.SavedScriptId is null)
+            {
+                continue;
+            }
+            await Clients.Caller.RunScript(
+                run.SavedScriptId.Value,
+                run.Id,
+                run.Initiator ?? "Unknown Initiator",
+                run.InputType,
+                authToken);
+        }
+    }
+
+    public async Task<bool> DeviceCameOnline(DeviceClientDto device)
+    {
+        try
+        {
+            if (await CheckForDeviceBan(device.ID, device.DeviceName))
+            {
+                return false;
             }
 
             var ip = Context.GetHttpContext()?.Connection?.RemoteIpAddress;
@@ -156,19 +176,18 @@ namespace Remotely.Server.Hubs
             {
                 ip = ip.MapToIPv4();
             }
-            device.PublicIP = ip?.ToString();
+            device.PublicIP = $"{ip}";
 
-            if (CheckForDeviceBan(device.PublicIP))
+            if (await CheckForDeviceBan(device.PublicIP))
             {
-                return;
+                return false;
             }
 
-
             var result = await _dataService.AddOrUpdateDevice(device);
-
-            if (result.IsSuccess)
+            if (!result.IsSuccess)
             {
-                return;
+                // Organization wasn't found.
+                return false;
             }
 
             Device = result.Value;
@@ -185,125 +204,201 @@ namespace Remotely.Server.Hubs
 
             foreach (var connection in connections)
             {
-                _ = connection.InvokeCircuitEvent(CircuitEventName.DeviceUpdate, Device);
+                var message = new DeviceStateChangedMessage(Device);
+                await _messenger.Send(message, connection.ConnectionId);
             }
 
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while setting device to online status.");
+        }
 
-            await CheckForPendingSriptRuns();
+        Context.Abort();
+        return false;
+    }
+
+    public async Task DeviceHeartbeat(DeviceClientDto device)
+    {
+        if (await CheckForDeviceBan(device.ID, device.DeviceName))
+        {
+            return;
+        }
+
+        var ip = Context.GetHttpContext()?.Connection?.RemoteIpAddress;
+        if (ip != null && ip.IsIPv4MappedToIPv6)
+        {
+            ip = ip.MapToIPv4();
+        }
+        device.PublicIP = $"{ip}";
+
+        if (await CheckForDeviceBan(device.PublicIP))
+        {
+            return;
         }
 
 
-        public Task<bool> DisplayMessage(string consoleMessage, string popupMessage, string className, string requesterID)
+        var result = await _dataService.AddOrUpdateDevice(device);
+
+        if (!result.IsSuccess)
         {
-            return _circuitManager.InvokeOnConnection(requesterID, CircuitEventName.DisplayMessage, consoleMessage, popupMessage, className);
+            return;
         }
 
-        public Task<bool> DownloadFile(string fileID, string requesterID)
+        Device = result.Value;
+
+        _serviceSessionCache.AddOrUpdateByConnectionId(Context.ConnectionId, Device);
+
+        var userIDs = _circuitManager.Connections.Select(x => x.User.Id);
+
+        var filteredUserIDs = _dataService.FilterUsersByDevicePermission(userIDs, Device.ID);
+
+        var connections = _circuitManager.Connections
+            .Where(x => x.User.OrganizationID == Device.OrganizationID &&
+                filteredUserIDs.Contains(x.User.Id));
+
+        foreach (var connection in connections)
         {
-            return _circuitManager.InvokeOnConnection(requesterID, CircuitEventName.DownloadFile, fileID);
+            var message = new DeviceStateChangedMessage(Device);
+            await _messenger.Send(message, connection.ConnectionId);
         }
 
-        public Task<bool> DownloadFileProgress(int progressPercent, string requesterID)
-        {
-            return _circuitManager.InvokeOnConnection(requesterID, CircuitEventName.DownloadFileProgress, progressPercent);
-        }
 
-        public string GetServerUrl()
-        {
-            return _appConfig.ServerUrl;
-        }
+        await CheckForPendingScriptRuns();
+    }
 
-        public string GetServerVerificationToken()
-        {
-            return Device.ServerVerificationToken;
-        }
+    public Task DisplayMessage(string consoleMessage, string popupMessage, string className, string requesterId)
+    {
+        var message = new DisplayNotificationMessage(consoleMessage, popupMessage, className);
+        return _messenger.Send(message, requesterId);
+    }
 
-        public override Task OnDisconnectedAsync(Exception exception)
+    public Task DownloadFile(string fileID, string requesterId)
+    {
+        var message = new DownloadFileMessage(fileID);
+        return _messenger.Send(message, requesterId);
+    }
+
+    public Task DownloadFileProgress(int progressPercent, string requesterId)
+    {
+        var message = new DownloadFileProgressMessage(progressPercent);
+        return _messenger.Send(message, requesterId);
+    }
+
+    public async Task<string> GetServerUrl()
+    {
+        var settings = await _dataService.GetSettings();
+        return settings.ServerUrl;
+    }
+
+    public string GetServerVerificationToken()
+    {
+        return $"{Device?.ServerVerificationToken}";
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        try
         {
-            try
+            if (Device != null)
             {
-                if (Device != null)
+                _dataService.DeviceDisconnected(Device.ID);
+
+                Device.IsOnline = false;
+
+                var userIDs = _circuitManager.Connections.Select(x => x.User.Id);
+
+                var filteredUserIDs = _dataService.FilterUsersByDevicePermission(userIDs, Device.ID);
+
+                var connections = _circuitManager.Connections
+                    .Where(x => x.User.OrganizationID == Device.OrganizationID &&
+                        filteredUserIDs.Contains(x.User.Id));
+
+                foreach (var connection in connections)
                 {
-                    _dataService.DeviceDisconnected(Device.ID);
-
-                    Device.IsOnline = false;
-
-                    var userIDs = _circuitManager.Connections.Select(x => x.User.Id);
-
-                    var filteredUserIDs = _dataService.FilterUsersByDevicePermission(userIDs, Device.ID);
-
-                    var connections = _circuitManager.Connections
-                        .Where(x => x.User.OrganizationID == Device.OrganizationID &&
-                            filteredUserIDs.Contains(x.User.Id));
-
-                    foreach (var connection in connections)
-                    {
-                        connection.InvokeCircuitEvent(CircuitEventName.DeviceWentOffline, Device);
-                    }
+                    var message = new DeviceStateChangedMessage(Device);
+                    await _messenger.Send(message, connection.ConnectionId);
                 }
-                return base.OnDisconnectedAsync(exception);
             }
-            finally
+            await base.OnDisconnectedAsync(exception);
+        }
+        finally
+        {
+            _serviceSessionCache.TryRemoveByConnectionId(Context.ConnectionId, out _);
+        }
+    }
+
+    public Task ReturnPowerShellCompletions(PwshCommandCompletion completion, CompletionIntent intent, string senderConnectionId)
+    {
+        var message = new PowerShellCompletionsMessage(completion, intent);
+        return _messenger.Send(message, senderConnectionId);
+    }
+
+    public async Task ScriptResult(string scriptResultId)
+    {
+        var result = await _dataService.GetScriptResult(scriptResultId);
+        if (!result.IsSuccess)
+        {
+            return;
+        }
+
+        var message = new ScriptResultMessage(result.Value);
+        await _messenger.Send(message, $"{result.Value.SenderConnectionID}");
+    }
+
+    public void ScriptResultViaApi(string commandID, string requestID)
+    {
+        ApiScriptResults.Set(requestID, commandID, DateTimeOffset.Now.AddHours(1));
+    }
+
+    public Task SendConnectionFailedToViewers(List<string> viewerIDs)
+    {
+        return _viewerHubContext.Clients.Clients(viewerIDs).SendAsync("ConnectionFailed");
+    }
+
+    public Task SendLogs(string logChunk, string requesterConnectionId)
+    {
+        var message = new ReceiveLogsMessage(logChunk);
+        return _messenger.Send(message, requesterConnectionId);
+    }
+
+    public void SetServerVerificationToken(string verificationToken)
+    {
+        if (Device is null)
+        {
+            return;
+        }
+        Device.ServerVerificationToken = verificationToken;
+        _dataService.SetServerVerificationToken(Device.ID, verificationToken);
+    }
+
+    public Task TransferCompleted(string transferId, string requesterId)
+    {
+        var message = new TransferCompleteMessage(transferId);
+        return _messenger.Send(message, requesterId);
+    }
+
+    private async Task<bool> CheckForDeviceBan(params string[] deviceIdNameOrIPs)
+    {
+        var settings = await _dataService.GetSettings();
+        foreach (var device in deviceIdNameOrIPs)
+        {
+            if (string.IsNullOrWhiteSpace(device))
             {
-                _serviceSessionCache.TryRemoveByConnectionId(Context.ConnectionId, out _);
+                continue;
             }
-        }
 
-        public Task ReturnPowerShellCompletions(PwshCommandCompletion completion, CompletionIntent intent, string senderConnectionId)
-        {
-            return _circuitManager.InvokeOnConnection(senderConnectionId, CircuitEventName.PowerShellCompletions, completion, intent);
-        }
-
-        public Task ScriptResult(string scriptResultId)
-        {
-            var result = _dataService.GetScriptResult(scriptResultId);
-            return _circuitManager.InvokeOnConnection(result.SenderConnectionID,
-                CircuitEventName.ScriptResult,
-                result);
-        }
-
-        public void ScriptResultViaApi(string commandID, string requestID)
-        {
-            ApiScriptResults.Set(requestID, commandID, DateTimeOffset.Now.AddHours(1));
-        }
-        public Task SendConnectionFailedToViewers(List<string> viewerIDs)
-        {
-            return _viewerHubContext.Clients.Clients(viewerIDs).SendAsync("ConnectionFailed");
-        }
-
-        public Task SendLogs(string logChunk, string requesterConnectionId)
-        {
-            return _circuitManager.InvokeOnConnection(requesterConnectionId, CircuitEventName.RemoteLogsReceived, logChunk);
-        }
-        public void SetServerVerificationToken(string verificationToken)
-        {
-            Device.ServerVerificationToken = verificationToken;
-            _dataService.SetServerVerificationToken(Device.ID, verificationToken);
-        }
-        public Task TransferCompleted(string transferID, string requesterID)
-        {
-            return _circuitManager.InvokeOnConnection(requesterID, CircuitEventName.TransferCompleted, transferID);
-        }
-        private bool CheckForDeviceBan(params string[] deviceIdNameOrIPs)
-        {
-            foreach (var device in deviceIdNameOrIPs)
+            if (settings.BannedDevices.Any(x => !string.IsNullOrWhiteSpace(x) &&
+                x.Equals(device, StringComparison.OrdinalIgnoreCase)))
             {
-                if (string.IsNullOrWhiteSpace(device))
-                {
-                    continue;
-                }
+                _logger.LogWarning("Device ID/name/IP ({device}) is banned.  Sending uninstall command.", device);
 
-                if (_appConfig.BannedDevices.Any(x => !string.IsNullOrWhiteSpace(x) &&
-                    x.Equals(device, StringComparison.OrdinalIgnoreCase)))
-                {
-                    _logger.LogWarning("Device ID/name/IP ({device}) is banned.  Sending uninstall command.", device);
-
-                    _ = Clients.Caller.SendAsync("UninstallAgent");
-                    return true;
-                }
+                await Clients.Caller.UninstallAgent();
+                return true;
             }
-           
-            return false;
         }
+
+        return false;
     }
 }
